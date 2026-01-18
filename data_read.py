@@ -1,158 +1,149 @@
+import os
 import scipy.io as sio
 import numpy as np
 from sklearn.decomposition import PCA
-from build_EMP import build_emp 
+from build_EMP import build_emp
 
-def pca_whitening(image, number_of_pc):
-    shape = image.shape
-    image = np.reshape(image, [shape[0]*shape[1], shape[2]])
-    number_of_rows = shape[0]
-    number_of_columns = shape[1]
-    pca = PCA(n_components = number_of_pc)
-    image = pca.fit_transform(image)
-    pc_images = np.zeros(shape=(number_of_rows, number_of_columns, number_of_pc),dtype=np.float32)
-    for i in range(number_of_pc):
-        pc_images[:, :, i] = np.reshape(image[:, i], (number_of_rows, number_of_columns))
-    return pc_images
+
+def _load_mat_key(file_path, keys):
+    data = sio.loadmat(file_path)
+    for k in keys:
+        if k in data:
+            return data[k]
+    for k, v in data.items():
+        if not k.startswith("__"):
+            return v
+    raise KeyError(f"No valid keys found in {file_path}. keys={list(data.keys())}")
+
+
+def _merge_train_test(train_data, test_data):
+    # allow different N but require sample shape match
+    if train_data.ndim != test_data.ndim:
+        raise ValueError(f"ndim mismatch: {train_data.ndim} vs {test_data.ndim}")
+    if train_data.shape[1:] != test_data.shape[1:]:
+        raise ValueError(f"sample shape mismatch: {train_data.shape} vs {test_data.shape}")
+    return np.concatenate([train_data, test_data], axis=0)
+
+
+def _merge_labels(y_tr, y_te):
+    y_tr = np.asarray(y_tr).reshape(-1)
+    y_te = np.asarray(y_te).reshape(-1)
+    return np.concatenate([y_tr, y_te], axis=0)
+
+
+def _normalize01(x):
+    x = x.astype(np.float32)
+    mn = float(np.min(x))
+    mx = float(np.max(x))
+    if mx - mn < 1e-8:
+        return np.zeros_like(x, dtype=np.float32)
+    return (x - mn) / (mx - mn)
+
+
+def pca_whitening_patches(patches, number_of_pc):
+    # patches: (N, ws, ws, C) -> (N, ws, ws, number_of_pc)
+    n, h, w, c = patches.shape
+    x = patches.reshape(-1, c)
+    pca = PCA(n_components=number_of_pc)
+    z = pca.fit_transform(x)
+    return z.reshape(n, h, w, number_of_pc).astype(np.float32)
+
 
 def load_data(dataset):
-    if dataset == 'Trento':
-        image_file_HSI = r'Trento/HSI.mat'
-        image_file_LiDAR = r'Trento/LiDAR.mat'
-        label_file_tr = r'Trento/TRLabel.mat'
-        label_file_ts = r'Trento/TSLabel.mat'
-        image_data_HSI = sio.loadmat(image_file_HSI)
-        image_data_LiDAR = sio.loadmat(image_file_LiDAR)
-        label_data_tr = sio.loadmat(label_file_tr) 
-        label_data_ts = sio.loadmat(label_file_ts)
-        image_HSI = image_data_HSI['HSI']
-        image_LiDAR = image_data_LiDAR['LiDAR']
-        label = label_data_tr['TRLabel']+label_data_ts['TSLabel']
-    elif dataset == '2013houston':
-        image_file_HSI = r'./Houston2013/HSI.mat'
-        image_file_LiDAR = r'./Houston2013/LiDAR.mat'
-        label_file_tr = r'./Houston2013/TRLabel.mat'
-        label_file_ts = r'./Houston2013/TSLabel.mat'
-        image_data_HSI = sio.loadmat(image_file_HSI)
-        image_data_LiDAR = sio.loadmat(image_file_LiDAR)
-        label_data_tr = sio.loadmat(label_file_tr) 
-        label_data_ts = sio.loadmat(label_file_ts)        
-        image_HSI = image_data_HSI['HSI']
-        image_LiDAR = image_data_LiDAR['LiDAR']
-        label = label_data_tr['TRLabel']+label_data_ts['TSLabel']
-    elif dataset == 'Muufl':
-        image_file_HSI = r'Muufl/hsi.mat'
-        image_file_LiDAR = r'Muufl/lidar.mat'
-        label_file = r'Muufl/train_test_gt.mat'
-        image_data_HSI = sio.loadmat(image_file_HSI)
-        image_data_LiDAR = sio.loadmat(image_file_LiDAR)
-        label_data = sio.loadmat(label_file)
-        image_HSI = image_data_HSI['HSI']
-        image_LiDAR = image_data_LiDAR['lidar']
-        label = label_data['trainlabels']+label_data['testlabels']
-    else:
-        raise Exception('dataset does not find')
-    image_HSI = image_HSI.astype(np.float32)
-    image_LiDAR = image_LiDAR.astype(np.float32)
-    label = label.astype(np.int64)
-    return image_HSI, image_LiDAR, label
- 
+    """
+    Trento patch-only loader
+
+    Returns:
+      patch_HSI   : (N, ws, ws, B) float32
+      patch_LiDAR : (N, ws, ws, 1) float32
+      y           : (N,) int64 (0-based class index)
+    """
+    if dataset != "Trento":
+        raise ValueError("This data_read.py supports only Trento patch dataset.")
+
+    base = "/root/autodl-tmp/Trento遥感图像数据集【HSI+LiDAR】】"
+
+    HSI_tr = _load_mat_key(os.path.join(base, "HSI_Tr.mat"), ["HSI", "HSI_Tr", "hsi"])
+    HSI_te = _load_mat_key(os.path.join(base, "HSI_Te.mat"), ["HSI", "HSI_Te", "hsi"])
+    LiDAR_tr = _load_mat_key(os.path.join(base, "LIDAR_Tr.mat"), ["LiDAR", "LIDAR_Tr", "lidar"])
+    LiDAR_te = _load_mat_key(os.path.join(base, "LIDAR_Te.mat"), ["LiDAR", "LIDAR_Te", "lidar"])
+
+    y_tr = _load_mat_key(os.path.join(base, "TrLabel.mat"), ["TRLabel", "TrLabel", "trainlabels"])
+    y_te = _load_mat_key(os.path.join(base, "TeLabel.mat"), ["TSLabel", "TeLabel", "testlabels"])
+
+    patch_HSI = _merge_train_test(HSI_tr, HSI_te).astype(np.float32)
+    patch_LiDAR = _merge_train_test(LiDAR_tr, LiDAR_te).astype(np.float32)
+
+    if patch_LiDAR.ndim == 3:
+        patch_LiDAR = np.expand_dims(patch_LiDAR, -1)
+
+    y = _merge_labels(y_tr, y_te).astype(np.int64)
+    if y.min() == 1:
+        y = y - 1  # to 0-based
+
+    if patch_HSI.shape[0] != y.shape[0]:
+        raise ValueError(f"HSI N != label N: {patch_HSI.shape[0]} vs {y.shape[0]}")
+    if patch_LiDAR.shape[0] != y.shape[0]:
+        raise ValueError(f"LiDAR N != label N: {patch_LiDAR.shape[0]} vs {y.shape[0]}")
+
+    return patch_HSI, patch_LiDAR, y
+
 
 def readdata(type, dataset, windowsize, train_num, val_num, num):
+    """
+    Patch-only readdata.
+    Keep SAME 15 return items as original code so train.py unpacking won't break.
+    """
+    patch_HSI, patch_LiDAR, y = load_data(dataset)
 
-    or_image_HSI, or_image_LiDAR, or_label = load_data(dataset)
-    # image = np.expand_dims(image, 2)
-    halfsize = int((windowsize-1)/2)
-    number_class = np.max(or_label).astype(np.int64)
-    if dataset == 'Augsburg_SAR':
-        pass
-    elif dataset == 'Berlin' or dataset == 'Muufl':
+    if type == "PCA":
+        patch_HSI = pca_whitening_patches(patch_HSI, number_of_pc=30)
+    elif type == "EMP":
+        patch_HSI = pca_whitening_patches(patch_HSI, number_of_pc=4)
+    elif type == "none":
         pass
     else:
-        or_image_LiDAR = np.expand_dims(or_image_LiDAR, 2)
-    # or_image_LiDAR = np.expand_dims(or_image_LiDAR, 2)
-    image = np.pad(or_image_HSI, ((halfsize, halfsize), (halfsize, halfsize), (0, 0)), 'edge')
-    image_LiDAR = np.pad(or_image_LiDAR, ((halfsize, halfsize), (halfsize, halfsize), (0, 0)), 'edge')
-    label = np.pad(or_label, ((halfsize, halfsize), (halfsize, halfsize)), 'constant',constant_values=0)
-               
-    if type == 'PCA':
-        image1 = pca_whitening(image, number_of_pc = 30)
-        image_LiDAR1 = np.copy(image_LiDAR)
-    elif type == 'EMP':
-        image1 = pca_whitening(image, number_of_pc = 4)
-        num_openings_closings = 3
-        emp_image = build_emp(base_image=image1, num_openings_closings=num_openings_closings)
-        image1 = emp_image
-    elif type == 'none':
-        image1 = np.copy(image)
-        image_LiDAR1 = np.copy(image_LiDAR)
-    else:
-        raise Exception('type does not find')
-    image = (image1 - np.min(image1)) / (np.max(image1) - np.min(image1))
-    image_LiDAR = (image_LiDAR1 - np.min(image_LiDAR1)) / (np.max(image_LiDAR1) - np.min(image_LiDAR1))
-    #set the manner of selecting training samples 
-        
-    
-    n = np.zeros(number_class,dtype=np.int64)
-    for i in range(number_class):
-        temprow, tempcol = np.where(label == i + 1)
-        n[i] = len(temprow)    
-    total_num = np.sum(n)
-    
-    nTrain_perClass = np.ones(number_class,dtype=np.int64) * train_num
-    for i in range(number_class):
-        if n[i] <=  nTrain_perClass[i]: 
-            nTrain_perClass[i] = 15  
-    ###验证机数目
-    nValidation_perClass =  (n/total_num)*val_num
-    nvalid_perClass = nValidation_perClass.astype(np.int32)   
-       
+        raise ValueError("type does not find")
+
+    patch_HSI = _normalize01(patch_HSI)
+    patch_LiDAR = _normalize01(patch_LiDAR)
+
+    num_classes = int(y.max()) + 1
+    total_num = int(y.shape[0])
+
+    # shuffle split
+    rng = np.random.RandomState(num)
+    idx = np.arange(total_num)
+    rng.shuffle(idx)
+
+    # if user passes very large val_num, cap it
+    val_num = int(min(val_num, max(1, total_num // 5)))
+    val_idx = idx[:val_num]
+    train_idx = idx[val_num:]
+
+    train_image = patch_HSI[train_idx]
+    train_image_LIDAR = patch_LiDAR[train_idx]
+    train_label = y[train_idx]
+
+    validation_image = patch_HSI[val_idx]
+    validation_image_LIDAR = patch_LiDAR[val_idx]
+    validation_label = y[val_idx]
+
+    # placeholders to match original signature
+    nTrain_perClass = np.zeros(num_classes, dtype=np.int64)
+    nvalid_perClass = np.zeros(num_classes, dtype=np.int64)
+    train_index = train_idx.reshape(-1, 1).astype(np.int32)
+    val_index = val_idx.reshape(-1, 1).astype(np.int32)
     index = []
-    flag = 0
-    fl = 0
 
-    
-    bands = np.size(image,2)
-    bands_LIDAR = np.size(image_LiDAR,2)
-    validation_image = np.zeros([np.sum(nvalid_perClass), windowsize, windowsize, bands], dtype=np.float32)
-    validation_image_LIDAR = np.zeros([np.sum(nvalid_perClass), windowsize, windowsize, bands_LIDAR], dtype=np.float32)
-    validation_label = np.zeros(np.sum(nvalid_perClass), dtype=np.int64)
-    train_image = np.zeros([np.sum(nTrain_perClass), windowsize, windowsize, bands], dtype=np.float32)
-    train_image_LIDAR = np.zeros([np.sum(nTrain_perClass), windowsize, windowsize, bands_LIDAR], dtype=np.float32)
-    train_label = np.zeros(np.sum(nTrain_perClass),dtype=np.int64)
-    train_index = np.zeros([np.sum(nTrain_perClass), 2], dtype = np.int32)              
-    val_index =  np.zeros([np.sum(nvalid_perClass), 2], dtype = np.int32)   
-       
-    for i in range(number_class):        
-        temprow, tempcol = np.where(label == i + 1)
-        matrix = np.zeros([len(temprow),2], dtype=np.int64)
-        matrix[:,0] = temprow
-        matrix[:,1] = tempcol
-        np.random.seed(num)
-        np.random.shuffle(matrix)
-        
-        temprow = matrix[:,0]
-        tempcol = matrix[:,1]         
-        index.append(matrix)
+    image = None
+    image_LiDAR = None
+    label = y
 
-        for j in range(nTrain_perClass[i]):
-            train_image[flag + j, :, :, :] = image[(temprow[j] - halfsize):(temprow[j] + halfsize + 1),
-                                            (tempcol[j] - halfsize):(tempcol[j] + halfsize + 1)]
-            train_image_LIDAR[flag + j, :, :, :] = image_LiDAR[(temprow[j] - halfsize):(temprow[j] + halfsize + 1),
-                                            (tempcol[j] - halfsize):(tempcol[j] + halfsize + 1)]
-            train_label[flag + j] = i
-            train_index[flag + j] = matrix[j,:]
-        flag = flag + nTrain_perClass[i]
-
-        for j in range(nTrain_perClass[i], nTrain_perClass[i] + nvalid_perClass[i]):
-            validation_image[fl + j-nTrain_perClass[i], :, :,:] = image[(temprow[j] - halfsize):(temprow[j] + halfsize + 1),
-                                                   (tempcol[j] - halfsize):(tempcol[j] + halfsize + 1)]
-            validation_image_LIDAR[fl + j-nTrain_perClass[i], :, :,:] = image_LiDAR[(temprow[j] - halfsize):(temprow[j] + halfsize + 1),
-                                                   (tempcol[j] - halfsize):(tempcol[j] + halfsize + 1)]
-            validation_label[fl + j-nTrain_perClass[i] ] = i 
-            val_index[fl + j-nTrain_perClass[i]] = matrix[j,:]
-        fl =fl + nvalid_perClass[i]
-        
-
-    return train_image, train_image_LIDAR, train_label, validation_image, validation_image_LIDAR, validation_label,\
-           nTrain_perClass, nvalid_perClass,train_index, val_index, index, image, image_LiDAR, label,total_num
+    return (
+        train_image, train_image_LIDAR, train_label,
+        validation_image, validation_image_LIDAR, validation_label,
+        nTrain_perClass, nvalid_perClass,
+        train_index, val_index, index,
+        image, image_LiDAR, label, total_num
+    )
